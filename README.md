@@ -32,7 +32,7 @@ Only `DATABASE_URL` is required. Optional settings: `BIND_ADDR` (default `127.0.
 
 ## Deploy on Vercel
 
-Create a Vercel project with **Root Directory** set to `server` and **Framework Preset** set to **Other**. Leave build and output settings at their defaults. Vercel detects the [Rust runtime](https://vercel.com/docs/functions/runtimes/rust) and builds `api/calendar.rs`; `vercel.json` forwards all paths to that function while retaining the existing API paths, query strings, health check, and Swagger UI.
+Import `danik-progger/calendar-server` into Vercel with **Root Directory** set to `.` and **Framework Preset** set to **Other**. Leave build and output settings at their defaults. If importing a parent repository containing this project in `server/`, use `server` as the root instead. `vercel.json` explicitly selects `api/calendar.rs` for the [Rust runtime](https://vercel.com/docs/functions/runtimes/rust), so the native `src/main.rs` is not selected for deployment. It forwards all paths to that function while retaining the existing API paths, query strings, health check, and Swagger UI.
 
 Set `DATABASE_URL` in the project's environment variables to a reachable hosted PostgreSQL connection string. Use the provider's pooled endpoint and required TLS settings, such as `sslmode=require`. Each function instance reuses its database pool; the database must support connections from multiple instances. Set the project's function region near the database. Vercel does not run the PostgreSQL container or persist its Compose volume.
 

@@ -1,5 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "builds": [
+    { "src": "api/calendar.rs", "use": "@vercel/rust" }
+  ],
   "rewrites": [
     { "source": "/(.*)", "destination": "/api/calendar" }
   ]

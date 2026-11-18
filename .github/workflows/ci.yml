@@ -1,0 +1,75 @@
+name: Backend CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup show
+      - run: cargo fmt --check
+      - name: Type check all targets
+        run: cargo check --all-targets --locked
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install openapi-spec-validator==0.7.2
+          openapi-spec-validator openapi.yaml
+
+  integration:
+    if: github.event_name == 'pull_request' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_USER: calendar
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: calendar
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U calendar -d calendar"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://calendar:ci-only@127.0.0.1:5432/calendar
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup show
+      - run: cargo test --locked
+
+  docker:
+    if: github.event_name == 'pull_request' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_PASSWORD: ci-only
+      DATABASE_URL: postgres://calendar:ci-only@postgres:5432/calendar
+    steps:
+      - uses: actions/checkout@v6
+      - name: Apply test schema manually
+        run: |
+          docker compose up -d --wait postgres
+          for migration in migrations/*.sql; do
+            docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < "$migration"
+          done
+      - run: docker compose up -d --build api
+      - name: Smoke test
+        run: |
+          code=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --retry 20 --retry-connrefused --retry-delay 1 http://127.0.0.1:8080/healthz)
+          test "$code" = 204
+          curl --fail --silent --show-error http://127.0.0.1:8080/openapi.yaml | grep -F 'openapi: 3.1.1'
+          curl --fail --silent --show-error http://127.0.0.1:8080/docs/ | grep -F 'Swagger UI'
+      - if: failure()
+        run: docker compose logs --no-color
+      - if: always()
+        run: docker compose down --volumes

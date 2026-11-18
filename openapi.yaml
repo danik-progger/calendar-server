@@ -1,0 +1,130 @@
+openapi: 3.1.1
+info:
+  title: Calendar API
+  version: 0.1.0
+  description: Single-calendar event CRUD. No authentication or external sync.
+paths:
+  /api/v1/events:
+    get:
+      operationId: listEvents
+      summary: List events ordered by start time and ID
+      parameters:
+        - {name: from, in: query, description: Include events ending after this timestamp, schema: {type: string, format: date-time}}
+        - {name: to, in: query, description: Include events starting before this timestamp, schema: {type: string, format: date-time}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 100}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, default: 0}}
+      responses:
+        '200':
+          description: Events overlapping the optional range
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Event'}
+        '400': {description: Invalid query}
+        '500': {$ref: '#/components/responses/DatabaseError'}
+    post:
+      operationId: createEvent
+      summary: Create an event with a generated UUID
+      requestBody: {$ref: '#/components/requestBodies/EventInput'}
+      responses:
+        '201':
+          description: Created
+          headers:
+            Location:
+              schema: {type: string}
+              description: URL of the created event
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Event'}
+        '400': {description: Malformed JSON}
+        '422': {description: Invalid event}
+        '500': {$ref: '#/components/responses/DatabaseError'}
+  /api/v1/events/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      operationId: getEvent
+      summary: Get an event
+      responses:
+        '200':
+          description: Event
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Event'}
+        '400': {description: Invalid UUID}
+        '404': {description: Event not found}
+        '500': {$ref: '#/components/responses/DatabaseError'}
+    put:
+      operationId: updateEvent
+      summary: Replace all editable event fields
+      requestBody: {$ref: '#/components/requestBodies/EventInput'}
+      responses:
+        '200':
+          description: Updated event
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Event'}
+        '400': {description: Invalid UUID or malformed JSON}
+        '404': {description: Event not found}
+        '422': {description: Invalid event}
+        '500': {$ref: '#/components/responses/DatabaseError'}
+    delete:
+      operationId: deleteEvent
+      summary: Permanently delete an event
+      responses:
+        '204': {description: Deleted}
+        '400': {description: Invalid UUID}
+        '404': {description: Event not found}
+        '500': {$ref: '#/components/responses/DatabaseError'}
+  /healthz:
+    get:
+      operationId: health
+      summary: Check database connectivity
+      responses:
+        '204': {description: Ready}
+        '503': {description: Database unavailable}
+components:
+  requestBodies:
+    EventInput:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/EventInput'}
+  responses:
+    DatabaseError:
+      description: Database request failed
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code, message]
+            properties:
+              code: {type: string}
+              message: {type: string}
+  schemas:
+    EventInput:
+      type: object
+      additionalProperties: false
+      required: [title, startAt, endAt]
+      properties:
+        title: {type: string, minLength: 1}
+        description: {type: [string, 'null']}
+        startAt: {type: string, format: date-time}
+        endAt: {type: string, format: date-time, description: Exclusive end. Must be at least one minute after startAt at microsecond storage precision.}
+        allDay: {type: boolean, default: false, description: Display flag; timestamps still define the interval}
+    Event:
+      type: object
+      required: [id, title, description, startAt, endAt, allDay, createdAt, updatedAt]
+      properties:
+        id: {type: string, format: uuid}
+        title: {type: string, minLength: 1}
+        description: {type: [string, 'null']}
+        startAt: {type: string, format: date-time}
+        endAt: {type: string, format: date-time}
+        allDay: {type: boolean}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}

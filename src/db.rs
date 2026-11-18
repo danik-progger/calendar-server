@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::domain::Event;
+use crate::{domain::Event, http::EventMetadata};
 
 /// Event persistence, database startup, and health checks.
 #[async_trait::async_trait]
@@ -18,20 +18,31 @@ pub trait Database: Send + Sync {
     /// Returns overlapping events ordered by start and ID, using resolved paging arguments.
     async fn list(
         &self,
+        owner: &str,
         from: Option<DateTime<Utc>>,
         to: Option<DateTime<Utc>>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Self::Record>, Self::Error>;
 
-    async fn get(&self, id: Uuid) -> Result<Option<Self::Record>, Self::Error>;
-    async fn create(&self, event: Event) -> Result<Self::Record, Self::Error>;
+    async fn get(&self, owner: &str, id: Uuid) -> Result<Option<Self::Record>, Self::Error>;
+    async fn create(
+        &self,
+        owner: &str,
+        event: Event,
+        metadata: EventMetadata,
+    ) -> Result<Self::Record, Self::Error>;
 
     /// Replaces editable fields of an existing event and preserves creation time.
-    async fn update(&self, event: Event) -> Result<Option<Self::Record>, Self::Error>;
+    async fn update(
+        &self,
+        owner: &str,
+        event: Event,
+        metadata: EventMetadata,
+    ) -> Result<Option<Self::Record>, Self::Error>;
 
     /// Returns whether the event existed and was deleted.
-    async fn delete(&self, id: Uuid) -> Result<bool, Self::Error>;
+    async fn delete(&self, owner: &str, id: Uuid) -> Result<bool, Self::Error>;
 }
 
 /// Persisted Event fields, including timestamps managed by the database.
@@ -45,6 +56,7 @@ pub struct EventRecord {
     pub all_day: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub metadata: sqlx::types::Json<EventMetadata>,
 }
 
 #[derive(Debug)]
@@ -160,22 +172,24 @@ impl Database for PgEvents {
 
     async fn list(
         &self,
+        owner: &str,
         from: Option<DateTime<Utc>>,
         to: Option<DateTime<Utc>>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<EventRecord>, Self::Error> {
         let records = sqlx::query_as(
-            "SELECT id, title, description, start_at, end_at, all_day, created_at, updated_at
+            "SELECT id, title, description, start_at, end_at, all_day, created_at, updated_at, metadata
              FROM events
              WHERE ($1::timestamptz IS NULL OR end_at > $1)
-               AND ($2::timestamptz IS NULL OR start_at < $2)
+               AND ($2::timestamptz IS NULL OR start_at < $2) AND owner_id = $5
              ORDER BY start_at, id LIMIT $3 OFFSET $4",
         )
         .bind(from)
         .bind(to)
         .bind(limit)
         .bind(offset)
+        .bind(owner)
         .fetch_all(self.pool("list")?)
         .await
         .map_err(|error| DatabaseError::from_sqlx("list", error))?;
@@ -183,9 +197,10 @@ impl Database for PgEvents {
         Ok(records)
     }
 
-    async fn get(&self, id: Uuid) -> Result<Option<EventRecord>, Self::Error> {
-        let record = sqlx::query_as("SELECT * FROM events WHERE id = $1")
+    async fn get(&self, owner: &str, id: Uuid) -> Result<Option<EventRecord>, Self::Error> {
+        let record = sqlx::query_as("SELECT * FROM events WHERE id = $1 AND owner_id = $2")
             .bind(id)
+            .bind(owner)
             .fetch_optional(self.pool("get")?)
             .await
             .map_err(|error| DatabaseError::from_sqlx("get", error))?;
@@ -193,10 +208,22 @@ impl Database for PgEvents {
         Ok(record)
     }
 
-    async fn create(&self, event: Event) -> Result<EventRecord, Self::Error> {
+    async fn create(
+        &self,
+        owner: &str,
+        event: Event,
+        metadata: EventMetadata,
+    ) -> Result<EventRecord, Self::Error> {
         let record = sqlx::query_as(
-            "INSERT INTO events (id, title, description, start_at, end_at, all_day)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+            "INSERT INTO events (id, title, description, start_at, end_at, all_day, owner_id, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (id) DO UPDATE SET id = events.id
+             WHERE events.owner_id = EXCLUDED.owner_id
+               AND events.title = EXCLUDED.title
+               AND events.description IS NOT DISTINCT FROM EXCLUDED.description
+               AND events.start_at = EXCLUDED.start_at AND events.end_at = EXCLUDED.end_at
+               AND events.all_day = EXCLUDED.all_day AND events.metadata = EXCLUDED.metadata
+             RETURNING *",
         )
         .bind(event.id())
         .bind(event.title())
@@ -204,6 +231,8 @@ impl Database for PgEvents {
         .bind(event.start_at())
         .bind(event.end_at())
         .bind(event.all_day())
+        .bind(owner)
+        .bind(sqlx::types::Json(metadata))
         .fetch_one(self.pool("create")?)
         .await
         .map_err(|error| DatabaseError::from_sqlx("create", error))?;
@@ -211,10 +240,15 @@ impl Database for PgEvents {
         Ok(record)
     }
 
-    async fn update(&self, event: Event) -> Result<Option<EventRecord>, Self::Error> {
+    async fn update(
+        &self,
+        owner: &str,
+        event: Event,
+        metadata: EventMetadata,
+    ) -> Result<Option<EventRecord>, Self::Error> {
         let record = sqlx::query_as(
             "UPDATE events SET title = $2, description = $3, start_at = $4, end_at = $5,
-             all_day = $6, updated_at = now() WHERE id = $1 RETURNING *",
+             all_day = $6, metadata = $8, updated_at = now() WHERE id = $1 AND owner_id = $7 RETURNING *",
         )
         .bind(event.id())
         .bind(event.title())
@@ -222,6 +256,8 @@ impl Database for PgEvents {
         .bind(event.start_at())
         .bind(event.end_at())
         .bind(event.all_day())
+        .bind(owner)
+        .bind(sqlx::types::Json(metadata))
         .fetch_optional(self.pool("update")?)
         .await
         .map_err(|error| DatabaseError::from_sqlx("update", error))?;
@@ -229,9 +265,10 @@ impl Database for PgEvents {
         Ok(record)
     }
 
-    async fn delete(&self, id: Uuid) -> Result<bool, Self::Error> {
-        let result = sqlx::query("DELETE FROM events WHERE id = $1")
+    async fn delete(&self, owner: &str, id: Uuid) -> Result<bool, Self::Error> {
+        let result = sqlx::query("DELETE FROM events WHERE id = $1 AND owner_id = $2")
             .bind(id)
+            .bind(owner)
             .execute(self.pool("delete")?)
             .await
             .map_err(|error| DatabaseError::from_sqlx("delete", error))?;

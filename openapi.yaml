@@ -2,7 +2,9 @@ openapi: 3.1.1
 info:
   title: Calendar API
   version: 0.1.0
-  description: Single-calendar event CRUD. No authentication or external sync.
+  description: Private calendar event CRUD authenticated through the shared Better Auth server.
+security:
+  - bearerAuth: []
 paths:
   /api/v1/events:
     get:
@@ -14,6 +16,8 @@ paths:
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 100}}
         - {name: offset, in: query, schema: {type: integer, minimum: 0, default: 0}}
       responses:
+        '401': {description: "Missing, invalid, expired, or revoked session"}
+        '503': {description: Authentication service unavailable}
         '200':
           description: Events overlapping the optional range
           content:
@@ -25,9 +29,11 @@ paths:
         '500': {$ref: '#/components/responses/DatabaseError'}
     post:
       operationId: createEvent
-      summary: Create an event with a generated UUID
+      summary: Create an event with a supplied or generated UUID
       requestBody: {$ref: '#/components/requestBodies/EventInput'}
       responses:
+        '401': {description: "Missing, invalid, expired, or revoked session"}
+        '503': {description: Authentication service unavailable}
         '201':
           description: Created
           headers:
@@ -50,6 +56,8 @@ paths:
       operationId: getEvent
       summary: Get an event
       responses:
+        '401': {description: "Missing, invalid, expired, or revoked session"}
+        '503': {description: Authentication service unavailable}
         '200':
           description: Event
           content:
@@ -63,6 +71,8 @@ paths:
       summary: Replace all editable event fields
       requestBody: {$ref: '#/components/requestBodies/EventInput'}
       responses:
+        '401': {description: "Missing, invalid, expired, or revoked session"}
+        '503': {description: Authentication service unavailable}
         '200':
           description: Updated event
           content:
@@ -76,6 +86,8 @@ paths:
       operationId: deleteEvent
       summary: Permanently delete an event
       responses:
+        '401': {description: "Missing, invalid, expired, or revoked session"}
+        '503': {description: Authentication service unavailable}
         '204': {description: Deleted}
         '400': {description: Invalid UUID}
         '404': {description: Event not found}
@@ -83,11 +95,17 @@ paths:
   /healthz:
     get:
       operationId: health
+      security: []
       summary: Check database connectivity
       responses:
         '204': {description: Ready}
         '503': {description: Database unavailable}
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Better Auth session token from sign-in, validated by the shared auth server.
   requestBodies:
     EventInput:
       required: true
@@ -111,14 +129,23 @@ components:
       additionalProperties: false
       required: [title, startAt, endAt]
       properties:
+        id: {type: string, format: uuid, description: Optional client identity for retrying creation; must match path on update.}
+        metadata: {$ref: "#/components/schemas/EventMetadata"}
         title: {type: string, minLength: 1}
         description: {type: [string, 'null']}
         startAt: {type: string, format: date-time}
         endAt: {type: string, format: date-time, description: Exclusive end. Must be at least one minute after startAt at microsecond storage precision.}
         allDay: {type: boolean, default: false, description: Display flag; timestamps still define the interval}
+    EventMetadata:
+      type: object
+      additionalProperties: false
+      properties:
+        calendarId: {type: string, enum: [birthdays, personal, work, health], default: personal}
+        presentation: {type: string, enum: [standard, focus, call], default: standard}
+        durationMinute: {type: [integer, 'null'], minimum: 1, maximum: 1440}
     Event:
       type: object
-      required: [id, title, description, startAt, endAt, allDay, createdAt, updatedAt]
+      required: [id, title, description, startAt, endAt, allDay, createdAt, updatedAt, metadata]
       properties:
         id: {type: string, format: uuid}
         title: {type: string, minLength: 1}
@@ -128,3 +155,4 @@ components:
         allDay: {type: boolean}
         createdAt: {type: string, format: date-time}
         updatedAt: {type: string, format: date-time}
+        metadata: {$ref: "#/components/schemas/EventMetadata"}

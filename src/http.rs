@@ -1,5 +1,6 @@
 use std::{io, net::SocketAddr};
 
+use crate::auth::{Auth, UserId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -15,17 +16,50 @@ pub struct EventResponse {
     pub all_day: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub metadata: EventMetadata,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventRequest {
+    pub id: Option<Uuid>,
+    #[serde(default)]
+    pub metadata: EventMetadata,
     pub title: String,
     pub description: Option<String>,
     pub start_at: DateTime<Utc>,
     pub end_at: DateTime<Utc>,
     #[serde(default)]
     pub all_day: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventMetadata {
+    #[serde(default)]
+    pub calendar_id: CalendarCategory,
+    #[serde(default)]
+    pub presentation: Presentation,
+    pub duration_minute: Option<u16>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CalendarCategory {
+    Birthdays,
+    #[default]
+    Personal,
+    Work,
+    Health,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Presentation {
+    #[default]
+    Standard,
+    Focus,
+    Call,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,7 +78,7 @@ fn default_limit() -> i64 {
 }
 
 use axum::{
-    Json, Router as AxumRouter,
+    Extension, Json, Router as AxumRouter,
     extract::{DefaultBodyLimit, Path, Query, Request, State, rejection::JsonRejection},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -60,15 +94,24 @@ use utoipa_swagger_ui::SwaggerUi;
 #[async_trait::async_trait]
 pub trait EventHandlers: Clone + Send + Sync + 'static {
     async fn health(&self) -> bool;
-    async fn list(&self, query: ListRequest) -> Result<Vec<EventResponse>, RequestError>;
-    async fn get(&self, id: Uuid) -> Result<Option<EventResponse>, RequestError>;
-    async fn create(&self, request: EventRequest) -> Result<EventResponse, RequestError>;
+    async fn list(
+        &self,
+        owner: &str,
+        query: ListRequest,
+    ) -> Result<Vec<EventResponse>, RequestError>;
+    async fn get(&self, owner: &str, id: Uuid) -> Result<Option<EventResponse>, RequestError>;
+    async fn create(
+        &self,
+        owner: &str,
+        request: EventRequest,
+    ) -> Result<EventResponse, RequestError>;
     async fn update(
         &self,
+        owner: &str,
         id: Uuid,
         request: EventRequest,
     ) -> Result<Option<EventResponse>, RequestError>;
-    async fn delete(&self, id: Uuid) -> Result<bool, RequestError>;
+    async fn delete(&self, owner: &str, id: Uuid) -> Result<bool, RequestError>;
 }
 
 #[derive(Debug)]
@@ -79,14 +122,18 @@ pub enum RequestError {
 
 const OPENAPI: &str = include_str!("../openapi.yaml");
 
-pub fn router<S: EventHandlers>() -> Result<AxumRouter<S>, serde_yaml_ng::Error> {
+pub fn router<S: EventHandlers>(auth: &Auth) -> Result<AxumRouter<S>, serde_yaml_ng::Error> {
     let spec: serde_json::Value = serde_yaml_ng::from_str(OPENAPI)?;
+    let events = auth.protect(
+        AxumRouter::new()
+            .route("/api/v1/events", get(list::<S>).post(create::<S>))
+            .route(
+                "/api/v1/events/{id}",
+                get(fetch::<S>).put(update::<S>).delete(delete::<S>),
+            ),
+    );
     Ok(AxumRouter::new()
-        .route("/api/v1/events", get(list::<S>).post(create::<S>))
-        .route(
-            "/api/v1/events/{id}",
-            get(fetch::<S>).put(update::<S>).delete(delete::<S>),
-        )
+        .merge(events)
         .route("/healthz", get(health::<S>))
         .route(
             "/openapi.yaml",
@@ -151,6 +198,7 @@ async fn health<S: EventHandlers>(State(state): State<S>) -> StatusCode {
 
 async fn list<S: EventHandlers>(
     State(state): State<S>,
+    Extension(UserId(owner)): Extension<UserId>,
     Query(query): Query<ListRequest>,
 ) -> Result<Json<Vec<EventResponse>>, HttpError> {
     if !(1..=1000).contains(&query.limit)
@@ -159,21 +207,27 @@ async fn list<S: EventHandlers>(
     {
         return Err(HttpError::InvalidQuery);
     }
-    Ok(Json(state.list(query).await?))
+    Ok(Json(state.list(&owner, query).await?))
 }
 
 async fn fetch<S: EventHandlers>(
     State(state): State<S>,
+    Extension(UserId(owner)): Extension<UserId>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<EventResponse>, HttpError> {
-    Ok(Json(state.get(id).await?.ok_or(HttpError::NotFound)?))
+    Ok(Json(
+        state.get(&owner, id).await?.ok_or(HttpError::NotFound)?,
+    ))
 }
 
 async fn create<S: EventHandlers>(
     State(state): State<S>,
+    Extension(UserId(owner)): Extension<UserId>,
     body: Result<Json<EventRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, HttpError> {
-    let event = state.create(body.map_err(HttpError::Json)?.0).await?;
+    let event = state
+        .create(&owner, body.map_err(HttpError::Json)?.0)
+        .await?;
     let location = format!("/api/v1/events/{}", event.id);
     Ok((
         StatusCode::CREATED,
@@ -184,18 +238,22 @@ async fn create<S: EventHandlers>(
 
 async fn update<S: EventHandlers>(
     State(state): State<S>,
+    Extension(UserId(owner)): Extension<UserId>,
     Path(id): Path<Uuid>,
     body: Result<Json<EventRequest>, JsonRejection>,
 ) -> Result<Json<EventResponse>, HttpError> {
-    let event = state.update(id, body.map_err(HttpError::Json)?.0).await?;
+    let event = state
+        .update(&owner, id, body.map_err(HttpError::Json)?.0)
+        .await?;
     Ok(Json(event.ok_or(HttpError::NotFound)?))
 }
 
 async fn delete<S: EventHandlers>(
     State(state): State<S>,
+    Extension(UserId(owner)): Extension<UserId>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, HttpError> {
-    if state.delete(id).await? {
+    if state.delete(&owner, id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(HttpError::NotFound)

@@ -1,6 +1,6 @@
 # Calendar API
 
-Simple event CRUD with Axum, SQLx, and PostgreSQL. One application table: `events`. No accounts, authentication, external sync, or background workers.
+Private event CRUD with Axum, SQLx, and PostgreSQL. Better Auth validates bearer sessions; every event operation is scoped to its owner. See [shared backend setup](../shared/BACKEND.md) for web, Neon, and native-client configuration.
 
 [App](src/app.rs) receives a [database adapter](src/db.rs) through its constructor and a [router](src/http.rs) at startup. Its `prepare` method verifies database access, attaches application state and tracing, and returns ready routing to either host. Native `run` serves that routing through a TCP listener; the Vercel entry point passes it to the Vercel runtime. App validates write requests as domain Events, calls the database, and maps database records to HTTP responses. Apply SQL migrations manually before using the Event routes.
 
@@ -8,47 +8,43 @@ Simple event CRUD with Axum, SQLx, and PostgreSQL. One application table: `event
 
 ```rust
 let db = PgEvents::default();
-let router = http::router()?;
+let auth = calendar_server::auth::Auth::new(&auth_base_url)?;
+let router = http::router(&auth)?;
 App::new(db).run(router, &database_url, bind).await?;
 ```
 
 ## Run
 
-Copy `.env.example` to `.env` and set a PostgreSQL password in both `POSTGRES_PASSWORD` and `DATABASE_URL`. Then:
+Production runs on Vercel with Neon hosting Postgres. For local application development, copy `.env.example` to `.env`, set `DATABASE_URL` to the Neon pooled connection string, and set `AUTH_BASE_URL` to the shared web/auth origin. Then:
 
 ```sh
-docker compose up --build
+cargo run --locked --bin calendar-server
 ```
 
-API: `http://127.0.0.1:8080/api/v1/events`. Swagger: `http://127.0.0.1:8080/docs/`. Compose keeps PostgreSQL data in a named volume. Apply the files in `migrations/` in filename order with your database tool before using the event API. The server never applies migrations. The API is unauthenticated; Compose publishes it on host loopback.
+API: `http://127.0.0.1:8080/api/v1/events`. Swagger: `http://127.0.0.1:8080/docs/`. Apply the files in `migrations/` in filename order using Neon's direct connection before using the event API. The server never applies migrations. Event routes require a Better Auth bearer session. Local application development connects to Neon; no local database service is required.
 
-For a native run, set `DATABASE_URL` to a host-accessible PostgreSQL URL:
-
-```sh
-cargo run --locked
-```
-
-Only `DATABASE_URL` is required. Optional settings: `BIND_ADDR` (default `127.0.0.1:8080`) and `RUST_LOG` (default `info`). The server loads `.env`; exported variables take precedence. `HTTP_PORT` controls the Compose host port.
+`DATABASE_URL` and `AUTH_BASE_URL` are required. Optional settings: `BIND_ADDR` (default `127.0.0.1:8080`) and `RUST_LOG` (default `info`). The server loads `.env`; exported variables take precedence.
 
 ## Deploy on Vercel
 
-Import `danik-progger/calendar-server` into Vercel with **Root Directory** set to `.` and **Framework Preset** set to **Other**. Leave build and output settings at their defaults. If importing a parent repository containing this project in `server/`, use `server` as the root instead. `vercel.json` explicitly selects `api/calendar.rs` for the [Rust runtime](https://vercel.com/docs/functions/runtimes/rust), so the native `src/main.rs` is not selected for deployment. It forwards all paths to that function while retaining the existing API paths, query strings, health check, and Swagger UI.
+Import `danik-progger/calendar-server` into Vercel with **Root Directory** set to `.` and **Framework Preset** set to **Other**. Leave build and output settings at their defaults. If importing a parent repository containing this project in `server/`, use `server` as the root instead. `vercel.json` sets `framework` to `null` (Other), so Vercel discovers `api/calendar.rs` as a [Rust function](https://vercel.com/docs/functions/runtimes/rust) instead of selecting the native `src/main.rs` through the Rust framework preset. Do not add a legacy `builds` override. The rewrite forwards all paths to that function while retaining the existing API paths, query strings, health check, and Swagger UI.
 
-Set `DATABASE_URL` in the project's environment variables to a reachable hosted PostgreSQL connection string. Use the provider's pooled endpoint and required TLS settings, such as `sslmode=require`. Each function instance reuses its database pool; the database must support connections from multiple instances. Set the project's function region near the database. Vercel does not run the PostgreSQL container or persist its Compose volume.
+Set `AUTH_BASE_URL` to the shared web/auth HTTPS origin. Set `DATABASE_URL` in the project's environment variables to Neon's pooled PostgreSQL connection string with its required TLS settings, such as `sslmode=require`. Each function instance reuses its database pool. Set the project's function region near the Neon database.
 
-Before sending event requests, apply `migrations/*.sql` in filename order using your database tool and the provider's migration/direct connection URL. Migrations are manual and never run during builds or requests. Use separate databases for preview and production deployments. Local `.env` files are excluded from uploads; `BIND_ADDR` and `HTTP_PORT` apply only to the native server.
+Before sending event requests, apply `migrations/*.sql` in filename order using your database tool and the provider's migration/direct connection URL. Migrations are manual and never run during builds or requests. Use separate databases for preview and production deployments. Local `.env` files are excluded from uploads; `BIND_ADDR` applies only to the native server.
 
-After deployment, `/healthz` must return 204, `/docs/` must show Swagger UI, and `/api/v1/events?limit=1` must return an array. The API remains unauthenticated: anyone who can reach it can read and modify events. Restrict access with Vercel Deployment Protection before storing private data. Web Better Auth and its SQLite storage are separate from this service and are not deployed by these settings.
+After deployment, `/healthz` must return 204, `/docs/` must show Swagger UI, and `/api/v1/events?limit=1` must return 401 without a bearer session or an array with a valid session. Web Better Auth is deployed separately and stores accounts in Postgres. Platform protection must permit calls between these services.
 
 ## Events
 
 ```sh
 curl http://127.0.0.1:8080/api/v1/events \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -d '{"title":"Meeting","startAt":"2026-11-13T10:00:00Z","endAt":"2026-11-13T11:00:00Z"}'
 ```
 
-The server generates `id`, `createdAt`, and `updatedAt`. Inputs contain `title`, optional nullable `description`, `startAt`, `endAt`, and optional `allDay` (default `false`). Empty titles return 422. Titles consisting only of spaces and text containing NUL return 500. Titles and descriptions are stored as supplied without trimming. Events must last at least one minute at microsecond storage precision. Shorter events return 422 on create and update. Timestamps accept RFC 3339 offsets and are returned in UTC. `allDay` is a display flag; callers choose the timestamp boundaries for their calendar's time zone. End is exclusive.
+The server generates `createdAt` and `updatedAt`; `id` can be supplied on POST or generated by the server. Identical POST retries with the same ID and owner return the existing event. IDs supplied on PUT must match the path. Optional `metadata` preserves calendar category, presentation, and all-day duration (see the OpenAPI schema). Inputs contain `title`, optional nullable `description`, `startAt`, `endAt`, and optional `allDay` (default `false`). Empty titles return 422. Titles consisting only of spaces and text containing NUL return 500. Titles and descriptions are stored as supplied without trimming. Events must last at least one minute at microsecond storage precision. Shorter events return 422 on create and update. Timestamps accept RFC 3339 offsets and are returned in UTC. `allDay` is a display flag; callers choose the timestamp boundaries for their calendar's time zone. End is exclusive.
 
 | Method | Path | Behavior |
 | --- | --- | --- |
@@ -64,7 +60,7 @@ HTTP owns list query DTOs, defaults, validation, and missing-record status decis
 
 ## Existing installations
 
-This is a breaking replacement of the previous authenticated sync backend, including the API body and initial migration. Use a fresh database. The server does not migrate, drop, or convert existing data. Export events and import them through the new API if needed. Existing databases and volumes are not modified by this source change.
+Apply `0002_event_owners.sql` and `0003_event_metadata.sql` after the existing initial migration. Legacy events retain a null owner and cannot be accessed through the API until their correct Better Auth user ID is explicitly assigned. New events always receive an owner from the validated session. Existing databases, SQLite accounts, browser storage, and volumes are not modified automatically.
 
 ## Verify
 
@@ -74,7 +70,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-Tests require `DATABASE_URL` pointing to a disposable PostgreSQL instance with permission to create databases. SQLx creates isolated test databases and applies the migration. Tests cover CRUD, permanent deletion, validation, range boundaries, pagination, the one-table schema, health, and docs. SQLx maintains its own `_sqlx_migrations` bookkeeping table.
+Tests require `DATABASE_URL` pointing to a disposable PostgreSQL instance with permission to create databases. CI starts PostgreSQL directly on its runner; no Docker service or Neon production credentials are needed. SQLx creates isolated test databases and applies the migration. Tests cover CRUD, permanent deletion, validation, range boundaries, pagination, the one-table schema, health, and docs. SQLx maintains its own `_sqlx_migrations` bookkeeping table.
 
 ## Logging
 

@@ -1,6 +1,6 @@
 use std::{env, io, net::SocketAddr};
 
-use calendar_server::{app::App, db::PgEvents, http};
+use calendar_server::{app::App, auth::Auth, db::PgEvents, http};
 
 fn main() -> io::Result<()> {
     if let Err(error) = dotenvy::from_path(".env")
@@ -23,7 +23,14 @@ fn main() -> io::Result<()> {
         .build()?
         .block_on(async {
             let db = PgEvents::default();
-            let router = http::router().map_err(io::Error::other)?;
+            let router = http::router(
+                &Auth::new(
+                    &env::var("AUTH_BASE_URL")
+                        .map_err(|_| io::Error::other("Set AUTH_BASE_URL"))?,
+                )
+                .map_err(io::Error::other)?,
+            )
+            .map_err(io::Error::other)?;
             App::new(db)
                 .run(router, &db_url, bind)
                 .await

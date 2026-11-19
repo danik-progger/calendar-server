@@ -272,6 +272,51 @@ async fn rejects_invalid_event_text_on_create_and_update(pool: PgPool) {
 }
 
 #[tokio::test]
+async fn cors_preflight_does_not_require_a_session() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://calendar@127.0.0.1:1/calendar")
+        .unwrap();
+    pool.close().await;
+    let auth = Auth::new("https://auth.example.com").unwrap();
+    let app = http::router(&auth)
+        .unwrap()
+        .with_state(App::new(PgEvents::new(pool)));
+
+    for method in ["GET", "POST", "PUT", "DELETE"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/v1/events")
+                    .header("origin", "https://calendar-web-lyart.vercel.app")
+                    .header("access-control-request-method", method)
+                    .header(
+                        "access-control-request-headers",
+                        "authorization,content-type",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        assert!(
+            response.headers()["access-control-allow-methods"]
+                .to_str()
+                .unwrap()
+                .split(',')
+                .any(|allowed| allowed == method)
+        );
+        assert_eq!(
+            response.headers()["access-control-allow-headers"],
+            "authorization,content-type"
+        );
+    }
+}
+
+#[tokio::test]
 async fn database_failures_return_safe_http_errors() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://calendar@127.0.0.1:1/calendar")

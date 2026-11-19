@@ -20,7 +20,7 @@ serde_yaml_ng = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "chrono", "uuid", "macros", "migrate", "json"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 tracing = "0.1"
 utoipa-swagger-ui = { version = "9", default-features = false, features = ["axum", "vendored"] }
 uuid = { version = "1", features = ["serde", "v4"] }

@@ -140,7 +140,18 @@ pub fn router<S: EventHandlers>(auth: &Auth) -> Result<AxumRouter<S>, serde_yaml
             get(|| async { ([(header::CONTENT_TYPE, "application/yaml")], OPENAPI) }),
         )
         .merge(SwaggerUi::new("/docs/").external_url_unchecked("/openapi.json", spec))
-        .layer(DefaultBodyLimit::max(128 * 1024)))
+        .layer(DefaultBodyLimit::max(128 * 1024))
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                ])
+                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]),
+        ))
 }
 
 pub fn with_tracing(router: AxumRouter) -> AxumRouter {
